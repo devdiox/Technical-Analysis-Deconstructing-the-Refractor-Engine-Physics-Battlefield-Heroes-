@@ -1,0 +1,55 @@
+Overview
+This research explores the inner workings of the Refractor Engine’s physics system, specifically focusing on vehicle dynamics, Havok integration, and the "Static Lock" phenomena that prevents programmatic manipulation of object velocity and position.
+
+1. The Physics Component Architecture
+In the Refractor Engine, objects (e.g., PlayerControlObject) do not handle physics directly. Instead, they delegate this to a specialized component.
+
+Memory Layout: Through memory inspection of the vehicle instance (v_ptr), we identified a critical pointer at v_ptr + 0x4C (or 0x44 in some builds) leading to the PhysicsNode.
+
+The Component Bridge: All physical state variables—velocity, angular momentum, and gravity modifiers—reside within this sub-structure.
+
+2. Deciphering the Velocity Offsets (0x20, 0x24, 0x28)
+Our analysis of the function sub_46FE0C (the engine's internal Vector3_Scale routine) confirms the following memory mapping for the Physics Component:
+
+Offset 0x20: Linear Velocity X (float)
+
+Offset 0x24: Linear Velocity Y (Vertical Lift)
+
+Offset 0x28: Linear Velocity Z (Forward/Backward)
+
+Evidence: ASM analysis shows a sequential fmul / fstp pattern targeting [eax], [eax+4], and [eax+8]. This is the classic signature of a 3D Vector operation. Since these values are processed by the damping (drag) functions, they are mathematically proven to be Velocity vectors, not Coordinates.
+
+3. The "Sleepiness" Optimization Barrier
+The most significant hurdle in vehicle manipulation is the Sleepiness System. To save CPU cycles, the engine "deactivates" objects that aren't undergoing significant external forces.
+
+Offsets: 0x64 (SleepinessMax) and 0x68 (Current Sleepiness).
+
+Finding: Even if Velocity is injected into 0x24, the engine will ignore the update if sleepiness == 0.
+
+Solution: To force movement, one must manually reset sleepiness to sleepinessMax every tick, tricking the engine into performing a physics update.
+
+4. Havok VTable & The Static Force Trap
+The connection to the raw Havok physics engine is handled via a VTable jump in sub_74BD85:
+
+mov ecx, [ecx+10h]    ; Retrieve Havok RigidBody pointer
+mov eax, [ecx]         ; Access Havok VTable
+jmp dword ptr [eax+90h] ; Jump to ApplyImpulse / ApplyForce
+If a vehicle refuses to move despite having a high velocity, it is usually because the Havok state is set to Fixed or Keyframed, causing all impulses sent via the +90h offset to be discarded by the Havok solver.
+
+5. The "Global Zero" Redirection (sub_7D84DB)
+We discovered that some objects are hard-locked to a "Zero Vector" via VTable redirection.
+
+Redirection: sub_74BD00 (Position Update) was found to jump directly to sub_7D84DB.
+
+Functionality: sub_7D84DB returns a pointer to a static memory region flt_CE2CFC initialized to (0, 0, 0).
+
+Impact: This effectively "nails" the object to its spawn coordinates, overriding any physical calculations performed by the Havok layer.
+
+Summary of Critical Offsets (PhysicsNode)
++0x0C	Byte	Active Flag (1 = Active, 0 = Sleeping)
++0x10	Pointer	Pointer to raw Havok RigidBody
++0x20	Vector3	Linear Velocity (X, Y, Z)
++0x58	Float	Gravity Modifier (1.0 = Default, -1.0 = Upwards)
++0x64	Int32	Sleepiness Max
++0x68	Int32	Current Sleepiness
++0xEC	Float	Vertical Impulse Buffer
